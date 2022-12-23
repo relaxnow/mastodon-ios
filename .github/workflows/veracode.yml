@@ -1,0 +1,71 @@
+name: Veracode Static Analysis Demo
+on: workflow_dispatch
+    
+jobs:
+  static_analysis:
+    name: Static Analysis
+    # Monterey or higher is required for gen-ir
+    runs-on: macos-12
+    
+    steps:
+      - name: checkout
+        uses: actions/checkout@v2
+        
+      - name: Setup
+        env: 
+          NotificationEndpointDebug: ${{ secrets.NotificationEndpointDebug }}
+          NotificationEndpointRelease: ${{ secrets.NotificationEndpointRelease }}
+        run: |
+            cd /Users/runner/work/mastodon-ios/mastodon-ios/
+            gem install bundler:2.3.11
+            bundle install
+            bundle exec arkana
+            bundle exec pod install
+      
+      - name: Install Homebrew dependencies
+        run: brew tap veracode/tap && brew install gen-ir
+        
+      - name: Export a Build Log with xcodebuild - clean
+        run: xcodebuild clean
+
+# TODO - get code signing to work
+      - name: Export a Build Log with xcodebuild - archive
+        run: |
+            xcodebuild archive \
+              -workspace Mastodon.xcworkspace \
+              -scheme Mastodon-Veracode \
+              -destination generic/platform=iOS \
+              -archivePath Mastodon.xcarchive \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              DEBUG_INFOMATION_FORMAT=dwarf-with-dsym \
+              ENABLE_BITCODE=NO > build.log
+
+      - name: Generate IR with a Build Log
+        run:  gen-ir build.log Mastodon.xcarchive/IR
+        
+      - name: Build Veracode dir
+        run: |
+          mkdir veracode
+          zip veracode/Matodon-Podfile.zip Podfile.lock
+          zip -r veracode/Mastodon.xcarchive.zip Mastodon.xcarchive
+      
+      # Can't use Veracode GitHub Action because container actions not supported on MacOS runners
+      - name: Upload & Scan
+        run: |
+          wget https://search.maven.org/remotecontent?filepath=com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/22.10.10.4/vosp-api-wrappers-java-22.10.10.4.jar -O VeracodeJavaAPI.jar
+          java \
+            -jar VeracodeJavaAPI.jar \
+            -debug \
+            -deleteincompletescan 2 \
+            -action uploadandscan \
+            -vid ${{ secrets.API_ID }} \
+            -vkey ${{ secrets.API_KEY }} \
+            -appname "relaxnow/mastodon-ios" \
+            -createprofile true \
+            -criticality VeryHigh \
+            -sandboxname github \
+            -createsandbox true \
+            -version "commit:${{ github.sha }},run_id:${{ github.run_id }},attempt_nr:${{ github.run_attempt }}" \
+            -filepath veracode
